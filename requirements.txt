@@ -1,0 +1,10 @@
+streamlit>=1.38
+requests>=2.32
+python-docx>=1.1
+pdfplumber>=0.11
+python-dotenv>=1.0
+
+# Only needed if you choose the "anthropic" provider (paid) in the sidebar.
+# Groq, Ollama, and Gemini are called via plain HTTP (requests, above) so no
+# extra SDK is needed for the free providers.
+# anthropic>=0.34
