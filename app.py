@@ -1,5 +1,6 @@
 import os
 import time
+import uuid
 import concurrent.futures as cf
 
 import streamlit as st
@@ -16,6 +17,12 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 tracker.init_db()
 
 st.set_page_config(page_title="Job Application Copilot", layout="wide", page_icon="🧭")
+
+# Give every visitor their own private session ID so the shared tracker.db
+# file on the server never mixes one person's resume/job history with
+# another's — see the big comment at the top of tracker.py.
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
 
 # ---------------------------------------------------------------- theme / CSS
 st.markdown("""
@@ -146,61 +153,32 @@ for key, default in [
     if key not in st.session_state:
         st.session_state[key] = default
 
-# ---------------------------------------------------------------- sidebar: settings
-with st.sidebar:
-    st.header("🤖 AI Provider")
-    st.caption("Using credentials saved in your `.env` file — nothing to enter here.")
+# ---------------------------------------------------------------- settings (all from .env, no UI)
+# No sidebar, no provider/key widgets — everything for a live public demo
+# comes silently from your .env file. If you ever want to switch provider
+# or model, change PROVIDER / *_MODEL in .env and restart the app.
+provider = config.PROVIDER if config.PROVIDER in ["groq", "ollama", "gemini", "anthropic"] else "groq"
 
-    provider = st.selectbox(
-        "Provider",
-        ["groq", "ollama", "gemini", "anthropic"],
-        index=["groq", "ollama", "gemini", "anthropic"].index(config.PROVIDER)
-        if config.PROVIDER in ["groq", "ollama", "gemini", "anthropic"] else 0,
-        format_func=lambda p: {
-            "groq": "Groq — free, no card, fast (recommended)",
-            "ollama": "Ollama — free, fully local/offline",
-            "gemini": "Google Gemini — free tier, no card",
-            "anthropic": "Anthropic Claude — paid, highest quality",
-        }[p],
-    )
+creds = {}
+if provider == "groq":
+    creds = {"api_key": config.GROQ_API_KEY, "model": config.GROQ_MODEL}
+elif provider == "ollama":
+    creds = {"base_url": config.OLLAMA_BASE_URL, "model": config.OLLAMA_MODEL}
+elif provider == "gemini":
+    creds = {"api_key": config.GEMINI_API_KEY, "model": config.GEMINI_MODEL}
+else:
+    creds = {"api_key": config.ANTHROPIC_API_KEY, "model": config.CLAUDE_MODEL}
 
-    # All keys come straight from config (.env / Streamlit secrets) — no key
-    # inputs are rendered in the UI at all, so nothing sensitive is ever sent
-    # to a visitor's browser, and there's nothing for anyone to fill in.
-    creds = {}
-    if provider == "groq":
-        creds["api_key"] = config.GROQ_API_KEY
-        creds["model"] = st.text_input("Groq model", value=config.GROQ_MODEL)
-    elif provider == "ollama":
-        creds["base_url"] = st.text_input("Ollama URL", value=config.OLLAMA_BASE_URL)
-        creds["model"] = st.text_input("Ollama model", value=config.OLLAMA_MODEL,
-                                        help="Must already be pulled: `ollama pull llama3.1:8b`")
-    elif provider == "gemini":
-        creds["api_key"] = config.GEMINI_API_KEY
-        creds["model"] = st.text_input("Gemini model", value=config.GEMINI_MODEL)
-    else:
-        creds["api_key"] = config.ANTHROPIC_API_KEY
-        creds["model"] = st.selectbox("Claude model", ["claude-haiku-4-5-20251001", "claude-sonnet-5"], index=0)
+adzuna_id = config.ADZUNA_APP_ID
+adzuna_key = config.ADZUNA_APP_KEY
+country = config.ADZUNA_COUNTRY
 
-    st.divider()
-    st.header("🔎 Job Search")
-    adzuna_id = config.ADZUNA_APP_ID
-    adzuna_key = config.ADZUNA_APP_KEY
-    country = st.text_input("Adzuna country code", value=config.ADZUNA_COUNTRY, help="us, gb, in, ca, au, de, fr...")
 
-    def creds_ready():
-        if provider == "ollama":
-            return bool(creds.get("base_url")) and bool(creds.get("model"))
-        return bool(creds.get("api_key"))
+def creds_ready():
+    if provider == "ollama":
+        return bool(creds.get("base_url")) and bool(creds.get("model"))
+    return bool(creds.get("api_key"))
 
-    if not creds_ready():
-        st.warning(
-            f"No {provider.title()} key found in `.env`. Add it there (e.g. "
-            f"`{provider.upper()}_API_KEY=...`) and restart the app."
-        )
-    if not (adzuna_id and adzuna_key):
-        st.caption("⚠️ No Adzuna keys in `.env` — live job search will be unavailable; "
-                   "you can still paste jobs manually in Tab 2.")
 
 tab1, tab2, tab3, tab4 = st.tabs(["1️⃣ Resume", "2️⃣ Find Jobs", "3️⃣ Generate", "4️⃣ Tracker"])
 
@@ -284,7 +262,7 @@ with tab3:
     if not st.session_state.resume_text:
         st.warning("Upload a resume in Tab 1 first.")
     elif not creds_ready():
-        st.warning(f"Add your {provider.title()} credentials in the sidebar first.")
+        st.warning(f"No {provider.title()} key found in your `.env` file. Add it there and restart the app.")
     elif n_jobs == 0:
         st.warning("Add some jobs in Tab 2 first.")
     else:
@@ -311,6 +289,7 @@ with tab3:
             candidate_name = st.session_state.candidate_name or "Your Name"
             contact_line = st.session_state.contact_line
             jobs_to_process = list(st.session_state.jobs)
+            session_id = st.session_state.session_id
 
             def process(job):
                 tailored = ai_tailor.tailor_for_job(provider, creds, resume_text, job)
@@ -320,7 +299,7 @@ with tab3:
                 resume_builder.build_resume_docx(candidate_name, contact_line, tailored, resume_path)
                 resume_builder.build_cover_letter_docx(
                     candidate_name, contact_line, tailored.get("cover_letter", ""), cover_path)
-                tracker.add_application(job, tailored.get("ats_match_score", 0), resume_path, cover_path)
+                tracker.add_application(session_id, job, tailored.get("ats_match_score", 0), resume_path, cover_path)
                 return job["id"], tailored, resume_path, cover_path
 
             with cf.ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -374,13 +353,13 @@ with tab3:
                         if job.get("url"):
                             st.link_button("🔗 Apply", job["url"], key=f"link_{job['id']}")
                     if st.button("✅ Mark as applied", key=f"applied_{job['id']}", use_container_width=True):
-                        tracker.mark_applied(job["id"])
+                        tracker.mark_applied(st.session_state.session_id, job["id"])
                         st.toast("Marked as applied!")
 
 # ---------------------------------------------------------------- Tab 4: Tracker
 with tab4:
     st.markdown('<div class="section-label">📋 Your application history</div>', unsafe_allow_html=True)
-    rows = tracker.get_all()
+    rows = tracker.get_all(st.session_state.session_id)
     if not rows:
         st.info("No applications generated yet.")
     else:
